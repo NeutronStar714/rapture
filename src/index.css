@@ -1,0 +1,144 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-rapture: #AA262C;
+  --color-rapture-dark: #8F1F24;
+  --color-rapture-light: #FDECEC;
+}
+
+/* Custom scrolling classes & animations */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ── PDF Viewport theme filters ── */
+.pdf-theme-light  { background-color: #525659; }
+.pdf-theme-dark   { background-color: #0f172a; }
+.pdf-theme-sepia  { background-color: #fbf0db; }
+
+.pdf-theme-dark canvas {
+  filter: invert(0.9) hue-rotate(180deg);
+  background-color: #ffffff;
+}
+.pdf-theme-sepia canvas {
+  filter: sepia(0.35) contrast(0.95);
+  background-color: #ffffff;
+}
+
+/* ── Night mode — darken ALL UI chrome ── */
+/* Root */
+.theme-dark {
+  background-color: #0f172a !important;
+}
+/* Panels — force dark bg on every visible container */
+.theme-dark [class*="bg-white"],
+.theme-dark [class*="bg-["],
+.theme-dark [id^="rapture-sidebar"],
+.theme-dark [id^="notes-sidebar"],
+.theme-dark header,
+.theme-dark nav,
+.theme-dark footer,
+.theme-dark [class*="border-gray"] {
+  background-color: #0f172a !important;
+  border-color: #1e293b !important;
+}
+/* Deep-cascade: all children inside dark panels lose white bg */
+.theme-dark [id^="rapture-sidebar"] *,
+.theme-dark [id^="notes-sidebar"] *,
+.theme-dark header *,
+.theme-dark nav *,
+.theme-dark footer * {
+  background-color: transparent;
+  border-color: #1e293b !important;
+}
+/* Inputs / buttons — dark surface */
+.theme-dark button,
+.theme-dark input,
+.theme-dark select,
+.theme-dark textarea {
+  background-color: #1e293b !important;
+  color: #e2e8f0 !important;
+  border-color: #334155 !important;
+}
+/* Text — chrome only, NOT the PDF viewport */
+.theme-dark :not(#pdf-view-scroll-container) :not(.rapture-text-layer) [class*="text-gray-"] { color: #94a3b8 !important; }
+.theme-dark :not(#pdf-view-scroll-container) :not(.rapture-text-layer) [class*="text-slate-"] {
+  color: #94a3b8 !important;
+}
+/* Landing page title — override text-black */
+.theme-dark .rapture-title { color: #cbd5e1 !important; }
+/* Scrollbar — dark */
+.theme-dark ::-webkit-scrollbar { width: 8px; }
+.theme-dark ::-webkit-scrollbar-track { background: #1e293b; }
+.theme-dark ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+
+/* ── PDF TextLayer (exact alignment, selectable text, native Ctrl+C) ── */
+/* Adapted from pdfjs-dist web/pdf_viewer.css — all CSS vars that          */
+/* pdfjsLib.TextLayer sets as inline styles depend on these being defined. */
+
+.rapture-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  pointer-events: auto;
+  transform-origin: 0 0;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  /* pdfjs sets --min-font-size on the container via JS */
+  --total-scale-factor: 1;
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.rapture-text-layer > span,
+.rapture-text-layer > br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+.rapture-text-layer > :not(.markedContent),
+.rapture-text-layer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+/* Native selection — pure browser blue, single layer */
+.rapture-text-layer > span::selection,
+.rapture-text-layer > br::selection {
+  background: rgba(0, 120, 255, 0.45);
+}
+
+/* Print CSS setup */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #print-container, #print-container * {
+    visibility: visible;
+  }
+  #print-container {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+}
+
