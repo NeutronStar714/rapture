@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-// @ts-expect-error - Vite handles ?url loader pattern natively
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 import { createSamplePDF } from './utils/samplePdf';
 import { LayoutMode, ReadingTheme, OutlineItem, SearchMatch, PageSize, PdfMetadata, RecentPdf, EyelinerNote } from './types';
@@ -20,7 +18,9 @@ import DocInfoModal from './components/DocInfoModal';
 import { Loader2, AlertCircle } from 'lucide-react';
 
 // Set up the local worker for fully offline parsing
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+// The worker is created here rather than from a URL so that pdfWorker.ts can load the engine
+// shims before PDF.js starts in that thread.
+pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL('./utils/pdfWorker.ts', import.meta.url), { type: 'module' });
 
 // Helper to recursively parse outline bookmarks to custom structure
 const resolveOutline = async (pdfDoc: pdfjsLib.PDFDocumentProxy, items: any[]): Promise<OutlineItem[]> => {
