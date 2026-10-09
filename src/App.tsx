@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 
 import { createSamplePDF } from './utils/samplePdf';
+import { PDFJS_ASSET_OPTIONS } from './utils/pdfAssets';
 import { LayoutMode, ReadingTheme, OutlineItem, SearchMatch, PageSize, PdfMetadata, RecentPdf, EyelinerNote } from './types';
 import { savePdfToDb, getPdfFromDb, savePdfCacheToDb, getPdfCacheFromDb, deletePdfFromDb } from './utils/db';
 import { tauriSaveNotes, isTauri } from './utils/tauri';
@@ -234,7 +235,7 @@ export default function App() {
     
     try {
       const buffer = data instanceof ArrayBuffer ? data : data.buffer;
-      const loadingTask = pdfjsLib.getDocument({ data: buffer });
+      const loadingTask = pdfjsLib.getDocument({ data: buffer, ...PDFJS_ASSET_OPTIONS });
       const pdf = await loadingTask.promise;
       
       await notePersistence.activate(name);
