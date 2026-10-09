@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { X, PenTool, Trash2, ArrowDownToLine, Download, Upload, Crosshair, Move } from 'lucide-react';
 import { EyelinerNote } from '../types';
 import { tauriExportDialog } from '../utils/tauri';
+import { autosizeTextarea, needsManualAutosize } from '../utils/textareaAutosize';
 
 interface NotesSidebarProps {
   isOpen: boolean;
@@ -239,7 +240,14 @@ interface NoteRowProps {
   onStartMoveNote: (id: string) => void;
 }
 
+// Engines without CSS field-sizing (WebKit before Safari 26) get a manual autosize instead.
+const manualAutosize = needsManualAutosize();
+
 function NoteRow({ note, moveNoteId, onUpdateText, onDelete, onScrollToLine, onStartMoveNote }: NoteRowProps) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    if (manualAutosize) autosizeTextarea(textareaRef.current);
+  }, [note.text]);
 
   return (
     <div
@@ -282,8 +290,9 @@ function NoteRow({ note, moveNoteId, onUpdateText, onDelete, onScrollToLine, onS
           P{note.pageNumber} · {(note.yPercent * 100).toFixed(0)}%
         </div>
 
-        {/* Note text — 30px, theme red, Arial — CSS field-sizing avoids JS layout thrash */}
+        {/* Note text — 30px, theme red, Arial — CSS field-sizing avoids JS layout thrash (manual fallback above where unsupported) */}
         <textarea
+          ref={textareaRef}
           value={note.text}
           onChange={event => onUpdateText(note.id, event.target.value)}
           placeholder="Type note..."
