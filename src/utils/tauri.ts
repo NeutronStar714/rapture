@@ -15,7 +15,8 @@ function getInvoke(): typeof invoke | null {
   return _invoke;
 }
 
-/** Save notes → Rust writes to %APPDATA%\Rapture\Notes\{name}.rapture */
+/** Save notes → Rust writes {name}.rapture into the notes/ folder of Rapture's per-user data
+ *  directory (%APPDATA%\Rapture on Windows, ~/Library/Application Support/Rapture on macOS). */
 export async function tauriSaveNotes(
   fileName: string,
   notes: EyelinerNote[],
