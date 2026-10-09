@@ -13,7 +13,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test:notes": "node --experimental-transform-types --test --test-isolation=none tests/notePersistence.test.mjs"
+    "test:notes": "node --experimental-transform-types --test --test-isolation=none tests/notePersistence.test.mjs",
+    "test": "node --experimental-transform-types --test --test-isolation=none \"tests/*.test.mjs\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
