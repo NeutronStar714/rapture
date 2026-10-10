@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-// @ts-expect-error - Vite handles ?url loader pattern natively
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 import { createSamplePDF } from './utils/samplePdf';
+import { PDFJS_ASSET_OPTIONS } from './utils/pdfAssets';
+import { toggleFullscreen } from './utils/fullscreen';
 import { LayoutMode, ReadingTheme, OutlineItem, SearchMatch, PageSize, PdfMetadata, RecentPdf, EyelinerNote } from './types';
 import { savePdfToDb, getPdfFromDb, savePdfCacheToDb, getPdfCacheFromDb, deletePdfFromDb } from './utils/db';
 import { tauriSaveNotes, isTauri } from './utils/tauri';
@@ -20,7 +20,9 @@ import DocInfoModal from './components/DocInfoModal';
 import { Loader2, AlertCircle } from 'lucide-react';
 
 // Set up the local worker for fully offline parsing
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+// The worker is created here rather than from a URL so that pdfWorker.ts can load the engine
+// shims before PDF.js starts in that thread.
+pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(new URL('./utils/pdfWorker.ts', import.meta.url), { type: 'module' });
 
 // Helper to recursively parse outline bookmarks to custom structure
 const resolveOutline = async (pdfDoc: pdfjsLib.PDFDocumentProxy, items: any[]): Promise<OutlineItem[]> => {
@@ -145,13 +147,24 @@ export default function App() {
     ];
   });
 
-  // Watch native Escape or fullscreen events to sync fullscreen state
+  // Keep the fullscreen state in sync when it changes outside the toolbar button: Escape or the
+  // browser's own controls on the web, and Escape, the green button or the View menu on desktop.
   useEffect(() => {
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
     document.addEventListener('fullscreenchange', handleFullscreenChange);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    if (isTauri()) {
+      const win = getCurrentWindow();
+      win.onResized(() => { win.isFullscreen().then(setIsFullscreen).catch(() => {}); })
+        .then(stop => { if (disposed) stop(); else unlisten = stop; })
+        .catch(() => {});
+    }
     return () => {
+      disposed = true;
+      unlisten?.();
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
   }, []);
@@ -234,7 +247,7 @@ export default function App() {
     
     try {
       const buffer = data instanceof ArrayBuffer ? data : data.buffer;
-      const loadingTask = pdfjsLib.getDocument({ data: buffer });
+      const loadingTask = pdfjsLib.getDocument({ data: buffer, ...PDFJS_ASSET_OPTIONS });
       const pdf = await loadingTask.promise;
       
       await notePersistence.activate(name);
@@ -936,18 +949,19 @@ export default function App() {
     });
   }, []);
 
-  // Fullscreen view modifier
+  // Fullscreen view modifier ("presentation mode"): the window on desktop, the page in a browser.
   const handleToggleFullscreen = () => {
-    const el = document.documentElement;
-    if (!document.fullscreenElement) {
-      el.requestFullscreen()
-        .then(() => setIsFullscreen(true))
-        .catch((err) => console.error('Failed to start presentation mode:', err));
-    } else {
-      document.exitFullscreen()
-        .then(() => setIsFullscreen(false))
-        .catch((err) => console.error('Failed to exit presentation mode:', err));
-    }
+    const native = isTauri()
+      ? { isFullscreen: () => getCurrentWindow().isFullscreen(), setFullscreen: (on: boolean) => getCurrentWindow().setFullscreen(on) }
+      : undefined;
+    const web = {
+      get fullscreenElement() { return document.fullscreenElement; },
+      requestFullscreen: () => document.documentElement.requestFullscreen(),
+      exitFullscreen: () => document.exitFullscreen(),
+    };
+    toggleFullscreen({ native, web })
+      .then(setIsFullscreen)
+      .catch((err) => console.error('Failed to toggle presentation mode:', err));
   };
 
   // Group pages side-by-side for double page views

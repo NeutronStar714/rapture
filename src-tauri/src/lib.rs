@@ -2,8 +2,8 @@ mod atomic_write;
 use atomic_write::atomic_write;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
-use tauri::Manager;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Deserialize)]
 struct WindowState {
@@ -14,14 +14,41 @@ struct WindowState {
     maximized: bool,
 }
 
-fn window_state_path() -> PathBuf {
-    PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
-        .join("Rapture")
-        .join("window_state.json")
+/* ── Storage locations ── */
+
+/// Environment variable that overrides where Rapture keeps its files (handy for development).
+const DATA_DIR_OVERRIDE: &str = "RAPTURE_DATA_DIR";
+
+/// Picks the folder Rapture stores its files in. An explicit override wins; otherwise it is
+/// the platform's per-user data folder plus `Rapture`, i.e. `%APPDATA%\Rapture` on Windows
+/// and `~/Library/Application Support/Rapture` on macOS. Debug and release builds share it.
+fn resolve_app_root(override_dir: Option<PathBuf>, platform_data_dir: Option<PathBuf>) -> Option<PathBuf> {
+    match override_dir {
+        Some(dir) if !dir.as_os_str().is_empty() => Some(dir),
+        _ => platform_data_dir.map(|dir| dir.join("Rapture")),
+    }
 }
 
-fn save_window_state(state: &WindowState) {
-    let path = window_state_path();
+/// Autosaved `.rapture` sidecars live here. Lowercase on purpose: it must match the folder the
+/// browser dev server writes to, and macOS filesystems can be case-sensitive.
+fn notes_dir(root: &Path) -> PathBuf {
+    root.join("notes")
+}
+
+fn app_root(app: &AppHandle) -> Result<PathBuf, String> {
+    resolve_app_root(
+        std::env::var_os(DATA_DIR_OVERRIDE).map(PathBuf::from),
+        app.path().data_dir().ok(),
+    )
+    .ok_or_else(|| "Could not determine where to store Rapture's files".to_string())
+}
+
+fn window_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app_root(app)?.join("window_state.json"))
+}
+
+fn save_window_state(app: &AppHandle, state: &WindowState) {
+    let Ok(path) = window_state_path(app) else { return };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -30,26 +57,11 @@ fn save_window_state(state: &WindowState) {
     }
 }
 
-fn load_window_state() -> Option<WindowState> {
-    let path = window_state_path();
+fn load_window_state(app: &AppHandle) -> Option<WindowState> {
+    let path = window_state_path(app).ok()?;
     fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-}
-
-fn app_root() -> PathBuf {
-    // Debug build → project root (dev convenience)
-    if cfg!(debug_assertions) {
-        if let Ok(exe) = std::env::current_exe() {
-            let mut root = exe.parent().unwrap().to_path_buf();
-            for _ in 0..3 { // src-tauri/target/debug → project root
-                if let Some(p) = root.parent() { root = p.to_path_buf(); }
-            }
-            return root;
-        }
-    }
-    // Release build → %APPDATA%\Rapture  (always)
-    PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("Rapture")
 }
 
 fn safe_name(name: &str) -> String {
@@ -73,9 +85,8 @@ struct EyelinerNote {
 }
 
 #[tauri::command]
-fn save_notes(file_name: String, notes: Vec<EyelinerNote>) -> Result<String, String> {
-    let root = app_root();
-    let notes_dir = root.join("Notes");
+fn save_notes(app: AppHandle, file_name: String, notes: Vec<EyelinerNote>) -> Result<String, String> {
+    let notes_dir = notes_dir(&app_root(&app)?);
     fs::create_dir_all(&notes_dir).map_err(|e| e.to_string())?;
 
     let safe = safe_name(&file_name);
@@ -159,10 +170,102 @@ async fn export_notes_dialog(
     }
 }
 
+/* ── macOS menu ── */
+
+/// Identifier of the custom Quit item in the macOS menu bar.
+#[cfg(target_os = "macos")]
+const QUIT_MENU_ID: &str = "rapture-quit";
+
+/// Tauri's default macOS menu, except that Quit (Cmd+Q) closes the main window instead of
+/// terminating the process outright. The stock Quit item bypasses the window's close-requested
+/// hooks, which would skip the pending-notes flush and the window-state save.
+#[cfg(target_os = "macos")]
+fn macos_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{
+        AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
+    };
+
+    let pkg = app.package_info();
+    let config = app.config();
+    let about = AboutMetadata {
+        name: Some(pkg.name.clone()),
+        version: Some(pkg.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+
+    let app_menu = Submenu::with_items(
+        app,
+        pkg.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, QUIT_MENU_ID, format!("Quit {}", pkg.name), true, Some("CmdOrCtrl+Q"))?,
+        ],
+    )?;
+    let file_menu = Submenu::with_items(app, "File", true, &[&PredefinedMenuItem::close_window(app, None)?])?;
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let view_menu = Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?;
+    let window_menu = Submenu::with_id_and_items(
+        app,
+        WINDOW_SUBMENU_ID,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+    let help_menu = Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[])?;
+
+    Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu, &help_menu])
+}
+
+/// Quit through the main window's close path so every close-requested hook runs first.
+#[cfg(target_os = "macos")]
+fn quit_via_window_close(app: &AppHandle) {
+    match app.get_webview_window("main") {
+        Some(window) => {
+            let _ = window.close();
+        }
+        None => app.exit(0),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(macos_menu).on_menu_event(|app, event| {
+        if event.id() == QUIT_MENU_ID {
+            quit_via_window_close(app);
+        }
+    });
+
+    builder
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -174,7 +277,8 @@ pub fn run() {
 
             // Restore previous window state
             if let Some(win) = app.get_webview_window("main") {
-                if let Some(state) = load_window_state() {
+                let handle = app.handle().clone();
+                if let Some(state) = load_window_state(&handle) {
                     let _ = win.set_position(tauri::LogicalPosition::new(state.x, state.y));
                     let _ = win.set_size(tauri::LogicalSize::new(state.width, state.height));
                     if state.maximized {
@@ -191,7 +295,7 @@ pub fn run() {
                             if let Ok(size) = window_clone.inner_size() {
                                 let logical_pos = pos.to_logical(scale);
                                 let logical_size = size.to_logical(scale);
-                                save_window_state(&WindowState {
+                                save_window_state(&handle, &WindowState {
                                     x: logical_pos.x,
                                     y: logical_pos.y,
                                     width: logical_size.width,
@@ -209,4 +313,41 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![save_notes, export_notes_dialog])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn override_dir_wins_over_platform_dir() {
+        let root = resolve_app_root(
+            Some(PathBuf::from("/custom/place")),
+            Some(PathBuf::from("/platform/data")),
+        );
+        assert_eq!(root, Some(PathBuf::from("/custom/place")));
+    }
+
+    #[test]
+    fn empty_override_is_ignored() {
+        let root = resolve_app_root(Some(PathBuf::new()), Some(PathBuf::from("/platform/data")));
+        assert_eq!(root, Some(PathBuf::from("/platform/data").join("Rapture")));
+    }
+
+    #[test]
+    fn platform_dir_gets_rapture_folder_appended() {
+        let root = resolve_app_root(None, Some(PathBuf::from("/platform/data")));
+        assert_eq!(root, Some(PathBuf::from("/platform/data").join("Rapture")));
+    }
+
+    #[test]
+    fn no_platform_dir_means_no_root() {
+        assert_eq!(resolve_app_root(None, None), None);
+    }
+
+    #[test]
+    fn notes_folder_is_lowercase() {
+        assert_eq!(notes_dir(Path::new("/root")), PathBuf::from("/root").join("notes"));
+    }
 }
