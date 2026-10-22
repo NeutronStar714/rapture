@@ -5,6 +5,7 @@ import fs from 'fs';
 import { randomUUID } from 'node:crypto';
 import {defineConfig, type Plugin} from 'vite';
 import { PDFJS_ASSET_BASE, PDFJS_ASSET_DIRS } from './src/utils/pdfAssets';
+import { sidecarFileName, legacySidecarStem } from './src/utils/sidecarName';
 
 /**
  * PDF.js auxiliary data (CMaps, standard fonts, wasm decoders, ICC profiles). PDF.js 6 ships
@@ -68,10 +69,14 @@ export default defineConfig(() => {
                 return;
               }
 
-              // Sanitize filename to prevent path traversal
-              const safeName = fileName.replace(/[^a-zA-Z0-9_\-\s\.\(\)]/g, '_').slice(0, 200);
               const notesDir = path.resolve(__dirname, 'notes');
-              const filePath = path.join(notesDir, `${safeName}.rapture`);
+              // Unicode-preserving name plus a derived hash; identical rules in src-tauri/src/lib.rs.
+              const filePath = path.join(notesDir, sidecarFileName(fileName));
+              // Adopt a sidecar written by the old sanitiser, once, if this document has none.
+              const legacyPath = path.join(notesDir, `${legacySidecarStem(fileName)}.rapture`);
+              if (legacyPath !== filePath && !fs.existsSync(filePath) && fs.existsSync(legacyPath)) {
+                try { fs.renameSync(legacyPath, filePath); } catch { /* the write below still proceeds */ }
+              }
 
               // Create notes/ directory if it doesn't exist
               if (!fs.existsSync(notesDir)) {

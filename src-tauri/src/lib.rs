@@ -64,11 +64,83 @@ fn load_window_state(app: &AppHandle) -> Option<WindowState> {
         .and_then(|s| serde_json::from_str(&s).ok())
 }
 
-fn safe_name(name: &str) -> String {
+/* ── Sidecar file naming ──
+ *
+ * Mirrors src/utils/sidecarName.ts. Keeps Unicode readable and appends a short hash of the
+ * original name, so documents that used to sanitise to the same file stay apart. The hash is
+ * derived, never stored. */
+
+const SIDECAR_SUFFIX: &str = ".rapture";
+const MAX_SIDECAR_BYTES: usize = 200;
+const HASH_LEN: usize = 8;
+
+fn is_legacy_safe_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '(' | ')' | '-' | '_')
+}
+
+/// Stem produced by the pre-fix sanitiser. Only used to find sidecars written before the fix.
+fn legacy_sidecar_stem(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '(' | ')' | '-' | '_') { c } else { '_' })
+        .map(|c| if is_legacy_safe_char(c) { c } else { '_' })
         .take(200)
         .collect()
+}
+
+fn fnv1a32_hex(bytes: &[u8]) -> String {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in bytes {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{:08x}", hash)
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    let mut out = String::new();
+    for c in value.chars() {
+        if out.len() + c.len_utf8() > max_bytes { break; }
+        out.push(c);
+    }
+    out
+}
+
+/// Sidecar file name for a document. A name the old rule reproduced losslessly keeps its exact
+/// previous sidecar name, so existing ASCII sidecars keep resolving.
+fn sidecar_file_name(file_name: &str) -> String {
+    if !file_name.is_empty() && file_name.chars().all(is_legacy_safe_char) {
+        return format!("{}{}", legacy_sidecar_stem(file_name), SIDECAR_SUFFIX);
+    }
+
+    let readable: String = file_name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => '_',
+            c => c,
+        })
+        .collect();
+    let readable = readable.trim().trim_start_matches('.').to_string();
+    let readable = if readable.is_empty() { "document".to_string() } else { readable };
+
+    let budget = MAX_SIDECAR_BYTES - (1 + HASH_LEN + SIDECAR_SUFFIX.len());
+    format!(
+        "{}-{}{}",
+        truncate_utf8(&readable, budget),
+        fnv1a32_hex(file_name.as_bytes()),
+        SIDECAR_SUFFIX,
+    )
+}
+
+/// Moves a sidecar written by the pre-fix sanitiser to its new name, once, when the document has
+/// no sidecar under the new name yet. The caller's write replaces the content immediately after.
+fn adopt_legacy_sidecar(notes_dir: &Path, file_name: &str, file_path: &Path) {
+    if file_path.exists() {
+        return;
+    }
+    let legacy = notes_dir.join(format!("{}.rapture", legacy_sidecar_stem(file_name)));
+    if legacy != file_path && legacy.exists() {
+        let _ = fs::rename(&legacy, file_path);
+    }
 }
 
 /* ── Notes ── */
@@ -89,8 +161,8 @@ fn save_notes(app: AppHandle, file_name: String, notes: Vec<EyelinerNote>) -> Re
     let notes_dir = notes_dir(&app_root(&app)?);
     fs::create_dir_all(&notes_dir).map_err(|e| e.to_string())?;
 
-    let safe = safe_name(&file_name);
-    let file_path = notes_dir.join(format!("{}.rapture", safe));
+    let file_path = notes_dir.join(sidecar_file_name(&file_name));
+    adopt_legacy_sidecar(&notes_dir, &file_name, &file_path);
 
     let payload = serde_json::json!({
         "version": 1,
@@ -140,8 +212,7 @@ async fn export_notes_dialog(
     use tauri_plugin_dialog::DialogExt;
     use std::sync::mpsc;
 
-    let safe = safe_name(&file_name);
-    let default_name = format!("{}.rapture", safe.replace(".pdf", ""));
+    let default_name = sidecar_file_name(&file_name);
 
     let (tx, rx) = mpsc::channel();
     app.dialog()
@@ -349,5 +420,76 @@ mod tests {
     #[test]
     fn notes_folder_is_lowercase() {
         assert_eq!(notes_dir(Path::new("/root")), PathBuf::from("/root").join("notes"));
+    }
+
+    /* Sidecar naming: shared vectors with tests/sidecarName.test.mjs. */
+
+    #[test]
+    fn fnv1a32_matches_reference_vectors() {
+        assert_eq!(fnv1a32_hex(b""), "811c9dc5");
+        assert_eq!(fnv1a32_hex(b"a"), "e40c292c");
+        assert_eq!(fnv1a32_hex(b"foobar"), "bf9cf968");
+    }
+
+    #[test]
+    fn lossless_ascii_names_keep_their_exact_old_sidecar_name() {
+        for name in ["Organic_Chemistry_J_Clayden.pdf", "Notes (draft) v2.pdf", "a-b_c.1.pdf"] {
+            assert_eq!(sidecar_file_name(name), format!("{}.rapture", name));
+            assert_eq!(sidecar_file_name(name), format!("{}.rapture", legacy_sidecar_stem(name)));
+        }
+    }
+
+    #[test]
+    fn unicode_names_stay_readable_and_gain_a_hash() {
+        let out = sidecar_file_name("有机化学.pdf");
+        assert!(out.starts_with("有机化学.pdf-"), "got {out}");
+        assert!(out.ends_with(".rapture"));
+        assert_eq!(out.len(), "有机化学.pdf-".len() + HASH_LEN + SIDECAR_SUFFIX.len());
+        assert_ne!(out, "______.pdf.rapture");
+    }
+
+    #[test]
+    fn names_that_used_to_collide_now_differ() {
+        let a = sidecar_file_name("有机化学.pdf");
+        let b = sidecar_file_name("物理化学.pdf");
+        assert_ne!(a, b);
+        // Both collapsed to the same stem under the old rule.
+        assert_eq!(legacy_sidecar_stem("有机化学.pdf"), legacy_sidecar_stem("物理化学.pdf"));
+
+        let question = sidecar_file_name("a?b.pdf");
+        let star = sidecar_file_name("a*b.pdf");
+        assert!(question.starts_with("a_b.pdf-"));
+        assert!(star.starts_with("a_b.pdf-"));
+        assert_ne!(question, star);
+    }
+
+    #[test]
+    fn unsafe_characters_become_underscores() {
+        let out = sidecar_file_name("a/b\\c:d*e?f\"g<h>i|j.pdf");
+        assert!(out.starts_with("a_b_c_d_e_f_g_h_i_j.pdf-"), "got {out}");
+    }
+
+    #[test]
+    fn long_unicode_names_stay_within_the_byte_budget() {
+        let long = format!("{}.pdf", "有".repeat(300));
+        let out = sidecar_file_name(&long);
+        assert!(out.len() <= MAX_SIDECAR_BYTES, "{} bytes", out.len());
+        assert!(out.ends_with(".rapture"));
+        // Truncation cut on a character boundary, so the name is still valid UTF-8.
+        assert!(out.starts_with('有'));
+    }
+
+    #[test]
+    fn naming_is_deterministic() {
+        assert_eq!(sidecar_file_name("有机化学.pdf"), sidecar_file_name("有机化学.pdf"));
+    }
+
+    #[test]
+    fn degenerate_names_are_still_usable() {
+        assert!(sidecar_file_name("").starts_with("document-"));
+        assert!(sidecar_file_name("???").starts_with("___-"));
+        // New-branch names lose leading dots; legacy-safe names pass through untouched.
+        assert!(!sidecar_file_name("..有机.pdf").starts_with('.'));
+        assert_eq!(sidecar_file_name("..pdf"), "..pdf.rapture");
     }
 }
