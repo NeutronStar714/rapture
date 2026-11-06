@@ -1,3 +1,4 @@
+import { DOCUMENT_ACCEPT } from '../utils/documentKind';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   PanelLeft,
@@ -30,6 +31,9 @@ interface ToolbarProps {
   fileName: string;
   currentPage: number;
   totalPages: number;
+  epubChapters?: string[];
+  epubChapterPercent?: number;
+  onEpubOptions?: () => void;
   zoom: number;
   layoutMode: LayoutMode;
   theme: ReadingTheme;
@@ -63,6 +67,9 @@ export default function Toolbar({
   fileName,
   currentPage,
   totalPages,
+  epubChapters,
+  epubChapterPercent,
+  onEpubOptions,
   zoom,
   layoutMode,
   theme,
@@ -98,9 +105,9 @@ export default function Toolbar({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0] && onFileSelect) {
-      onFileSelect(e.target.files[0]);
-    }
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = '';
+    if (file) onFileSelect?.(file);
   };
 
   // Keep zoom input in sync with zoom prop changes
@@ -162,12 +169,29 @@ export default function Toolbar({
     setActiveMenu(prev => prev === menu ? null : menu);
   };
 
+  const revisionButton = (
+    <button
+      onClick={onToggleRevision}
+      title="Revision Mode"
+      aria-pressed={revisionMode}
+      className={epubChapters
+        ? `epub-revision h-8 shrink-0 rounded border px-2.5 text-xs font-semibold transition-colors ${
+          revisionMode ? 'border-[#AA262C] bg-[#AA262C] text-white' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+        }`
+        : `px-2.5 py-1 text-[11px] font-bold rounded transition-all ${
+          revisionMode ? 'bg-[#AA262C] text-white shadow-xs' : 'text-gray-600 hover:text-gray-900'
+        }`}
+    >
+      Revision
+    </button>
+  );
+
   return (
     <div className="flex flex-col shrink-0 w-full z-30 print:hidden font-sans" ref={menuRef}>
       <input
         ref={fileInputRef}
         type="file"
-        accept=".pdf,application/pdf"
+        accept={DOCUMENT_ACCEPT}
         onChange={handleFileChange}
         className="hidden"
       />
@@ -186,7 +210,7 @@ export default function Toolbar({
         <div className="hidden md:flex absolute left-1/2 transform -translate-x-1/2 items-center gap-2 max-w-[40%]">
           <FileText size={14} className="text-gray-400 shrink-0" />
           <span className="text-xs font-semibold text-gray-700 truncate text-center" title={fileName}>
-            {fileName || 'document.pdf'}
+            {fileName || 'Document'}
           </span>
         </div>
 
@@ -237,7 +261,7 @@ export default function Toolbar({
                 className="w-full px-4 py-2 text-xs text-slate-500 hover:bg-gray-50 flex items-center gap-2"
               >
                 <FolderOpen size={13} className="text-slate-400" />
-                Load PDF from Device
+                Open Document
               </button>
               
               <div className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-t border-gray-100 mt-1">
@@ -308,6 +332,12 @@ export default function Toolbar({
 
           {activeMenu === 'tools' && (
             <div className="absolute right-0 top-8 bg-white border border-gray-200 shadow-lg rounded-xl py-1.5 w-48 z-40 text-left font-medium animate-in fade-in duration-100">
+              {onEpubOptions ? (
+                <button onClick={() => { setActiveMenu(null); onEpubOptions(); }}
+                  className="w-full px-4 py-2 text-xs text-gray-700 hover:bg-gray-50 flex items-center gap-2">
+                  <BookOpen size={13} className="text-gray-400" /> EPUB Options
+                </button>
+              ) : <>
               <button
                 onClick={() => { onShowInfo(); setActiveMenu(null); }}
                 className="w-full px-4 py-2 text-xs text-gray-700 hover:bg-gray-50 flex items-center gap-2"
@@ -329,7 +359,8 @@ export default function Toolbar({
                 <RotateCw size={13} className="text-gray-400" />
                 Rotate 90° Clockwise
               </button>
-              {onResetView && (
+              </>}
+              {!epubChapters && onResetView && (
                 <>
                   <div className="h-[1px] bg-gray-100 my-1"></div>
                   <button
@@ -375,6 +406,21 @@ export default function Toolbar({
 
         {/* Center: Controls Grid */}
         <div className="flex items-center gap-4">
+          {epubChapters ? (
+            <div className="flex min-w-0 items-center gap-2">
+              <select aria-label="Chapter" value={currentPage} onChange={event => onPageChange(Number(event.target.value))}
+                className="h-8 min-w-0 max-w-36 sm:max-w-60 px-2 rounded border border-gray-300 bg-white text-xs font-semibold">
+                {epubChapters.map((title, index) => <option key={index} value={index + 1}>{title}</option>)}
+              </select>
+              {epubChapterPercent !== undefined && (
+                <output aria-label="Chapter progress" aria-live="off"
+                  className="grid h-8 w-[4.25rem] shrink-0 place-items-center rounded border border-gray-300 bg-white font-mono text-[25px] font-semibold leading-none text-[#C0C0C0]">
+                  {epubChapterPercent}%
+                </output>
+              )}
+              {revisionButton}
+            </div>
+          ) : <>
           {/* Page Navigator */}
           <div className="flex items-center gap-1.5">
             <button
@@ -478,23 +524,20 @@ export default function Toolbar({
               <span className={layoutMode === 'double-scroll' ? 'text-[#AA262C]' : ''}>📖</span>
               <span className="hidden lg:inline">Book Scroll</span>
             </button>
-            <span className="w-px h-4 bg-gray-300 mx-0.5"></span>
-            <button
-              onClick={() => onToggleRevision?.()}
-              title="Revision Mode"
-              className={`px-2.5 py-1 text-[11px] font-bold rounded flex items-center gap-1 transition-all ${
-                revisionMode
-                  ? 'bg-[#AA262C] text-white shadow-xs font-bold'
-                  : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              <span className="hidden lg:inline">Revision</span>
-            </button>
+            <span className="w-px h-4 bg-gray-300 mx-0.5" />
+            {revisionButton}
           </div>
+          </>}
         </div>
 
         {/* Right Section: Extras, rotates, and Presentation Mode toggle */}
         <div className="flex items-center gap-1.5">
+          {onEpubOptions && (
+            <button onClick={onEpubOptions} aria-haspopup="dialog"
+              className="p-1.5 rounded whitespace-nowrap hover:bg-white hover:shadow-2xs text-gray-700 text-xs font-semibold cursor-pointer">
+              EPUB Options
+            </button>
+          )}
           <button
             onClick={onToggleNotesSidebar}
             title={notesSidebarOpen ? "Hide Notes" : "Show Notes"}
@@ -508,6 +551,7 @@ export default function Toolbar({
             <span>Notes</span>
           </button>
 
+          {!epubChapters && <>
           <div className="h-5 w-[1px] bg-gray-300 mx-1"></div>
 
           <button
@@ -517,6 +561,7 @@ export default function Toolbar({
           >
             <RotateCw size={14} />
           </button>
+          </>}
           <button
             onClick={onToggleFullscreen}
             title={isFullscreen ? "Exit Presentation" : "Presentation Mode"}

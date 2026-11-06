@@ -1,7 +1,9 @@
+import { DOCUMENT_ACCEPT, documentKind } from '../utils/documentKind';
 import React, { useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { UploadCloud, FileType, CheckCircle, ArrowRight, Play, Trash2 } from 'lucide-react';
 import { RecentPdf } from '../types';
+import WindowsUpdate from './WindowsUpdate';
 
 interface DropzoneProps {
   onFileSelect: (file: File) => void;
@@ -9,9 +11,10 @@ interface DropzoneProps {
   recentPdfs: RecentPdf[];
   onLoadRecent: (pdf: RecentPdf) => void;
   onDeleteRecent: (pdf: RecentPdf) => void;
+  beforeInstall: () => Promise<void>;
 }
 
-export default function Dropzone({ onFileSelect, onLoadSample, recentPdfs, onLoadRecent, onDeleteRecent }: DropzoneProps) {
+export default function Dropzone({ onFileSelect, onLoadSample, recentPdfs, onLoadRecent, onDeleteRecent, beforeInstall }: DropzoneProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragActive, setIsDragActive] = useState(false);
 
@@ -32,7 +35,7 @@ export default function Dropzone({ onFileSelect, onLoadSample, recentPdfs, onLoa
 
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const file = e.dataTransfer.files[0];
-      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+      if (documentKind(file.name, file.type)) {
         onFileSelect(file);
       }
     }
@@ -54,11 +57,14 @@ export default function Dropzone({ onFileSelect, onLoadSample, recentPdfs, onLoa
       >
         <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-50 text-[#AA262C] font-bold text-xs mb-4 border border-red-100/60">
           <span className="flex h-1.5 w-1.5 rounded-full bg-[#AA262C] animate-pulse"></span>
-          OFFLINE PDF READER
+          OFFLINE NOTE TAKING
         </div>
-        <h1 className="font-sans text-4xl md:text-5xl font-black tracking-tight text-black mb-3 rapture-title">
-          Do you believe in <span className="text-[#AA262C]">Rapture</span>?
-        </h1>
+        <div className="relative">
+          <h1 className="font-sans text-4xl md:text-5xl font-black tracking-tight text-black mb-3 rapture-title">
+            Do you believe in <span className="text-[#AA262C]">Rapture</span>?
+          </h1>
+          <WindowsUpdate beforeInstall={beforeInstall} />
+        </div>
       </motion.div>
 
       {/* Drag & Drop Area (Wider & Flatter Rectangle) */}
@@ -80,7 +86,7 @@ export default function Dropzone({ onFileSelect, onLoadSample, recentPdfs, onLoa
         <input
           ref={fileInputRef}
           type="file"
-          accept=".pdf,application/pdf"
+          accept={DOCUMENT_ACCEPT}
           onChange={handleFileChange}
           className="hidden"
         />
@@ -91,7 +97,7 @@ export default function Dropzone({ onFileSelect, onLoadSample, recentPdfs, onLoa
           </div>
           <div>
             <p className="text-slate-800 font-bold text-base">
-              Drag and drop your PDF here
+              Drag and drop a PDF or EPUB here
             </p>
             <p className="text-slate-500 text-xs mt-0.5">
               or <span className="text-[#AA262C] hover:text-[#8b1e24] underline font-bold">browse your computer files</span> to begin
@@ -122,8 +128,8 @@ export default function Dropzone({ onFileSelect, onLoadSample, recentPdfs, onLoa
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 w-full pb-16">
           {recentPdfs.map((pdf, idx) => {
-            const label = pdf.name.toLowerCase().includes('guide') ? 'GUIDE' : pdf.name.toLowerCase().includes('report') ? 'REPORT' : 'SECURE';
-            const pageStr = pdf.name.toLowerCase().includes('guide') ? '12 Pages' : pdf.name.toLowerCase().includes('report') ? '8 Pages' : '48 Pages';
+            const label = pdf.kind === 'epub' || documentKind(pdf.name) === 'epub' ? 'EPUB' : pdf.name.toLowerCase().includes('guide') ? 'GUIDE' : pdf.name.toLowerCase().includes('report') ? 'REPORT' : 'SECURE';
+            const pageStr = label === 'EPUB' ? 'Reflowable book' : pdf.name.toLowerCase().includes('guide') ? '12 Pages' : pdf.name.toLowerCase().includes('report') ? '8 Pages' : '48 Pages';
             return (
               <div 
                 key={pdf.name + '-' + idx}
@@ -153,6 +159,12 @@ export default function Dropzone({ onFileSelect, onLoadSample, recentPdfs, onLoa
                       alt={pdf.name} 
                       referrerPolicy="no-referrer"
                     />
+                  ) : label === 'EPUB' ? (
+                    <div className="h-full w-40 overflow-hidden rounded border border-gray-200 bg-white p-4 font-serif text-slate-700 shadow-xs">
+                      <span className="font-sans text-[8px] font-bold tracking-widest text-rapture">EPUB</span>
+                      <p className="mt-2 line-clamp-3 break-words text-sm font-semibold leading-tight">{pdf.subText || pdf.name}</p>
+                      <p className="mt-2 line-clamp-9 break-words text-[10px] leading-snug">{pdf.coverText}</p>
+                    </div>
                   ) : (
                     /* Elegant placeholder if no real cover image yet */
                     <div className="h-full w-40 bg-white border border-gray-200 rounded p-4 flex flex-col justify-between shadow-xs group-hover:border-[#AA262C]/30 transition-all duration-200">

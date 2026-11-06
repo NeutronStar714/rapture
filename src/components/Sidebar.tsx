@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Search, Image as ImageIcon, Bookmark, ChevronRight, CornerDownRight, ChevronsUpDown, AlertCircle } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { OutlineItem, SearchMatch, PageSize } from '../types';
+import { flashRed } from '../utils/flashRed';
 import PdfThumbnail from './PdfThumbnail';
 
 interface SidebarProps {
@@ -34,8 +35,11 @@ export default function Sidebar({
   isSearching,
   overlay = false,
 }: SidebarProps) {
-  const [activeTab, setActiveTab] = useState<'thumbnails' | 'outline' | 'search'>('thumbnails');
+  const [selectedTab, setActiveTab] = useState<'thumbnails' | 'outline' | 'search'>('thumbnails');
+  const activeTab = selectedTab === 'thumbnails' && !pdfDoc ? 'outline' : selectedTab;
   const [expandedOutlineItems, setExpandedOutlineItems] = useState<{ [title: string]: boolean }>({});
+  const resultFlash = useRef<Animation | null>(null);
+  useEffect(() => () => resultFlash.current?.cancel(), [searchResults, activeTab]);
 
   if (!isOpen) return null;
 
@@ -73,7 +77,7 @@ export default function Sidebar({
 
                 <div className="flex items-center gap-1.5 shrink-0">
                   <span className={`text-[9px] px-1 py-0.2 rounded font-mono ${isActive ? 'bg-red-100/80 text-[#AA262C] font-semibold' : 'bg-slate-100 text-slate-400 group-hover:bg-slate-200'}`}>
-                    p. {node.pageNumber}
+                    {pdfDoc ? 'p.' : 'ch.'} {node.pageNumber}
                   </span>
 
                   {hasChildren && (
@@ -126,7 +130,7 @@ export default function Sidebar({
 
       {/* Tabs */}
       <div className="flex border-b border-gray-200 px-2 py-1.5 bg-gray-50/50 gap-1">
-        <button
+        {pdfDoc && <button
           id="tab-thumbnails"
           onClick={() => setActiveTab('thumbnails')}
           className={`flex-1 flex items-center justify-center gap-1 py-1 text-[11px] font-bold rounded transition-all duration-150 cursor-pointer ${
@@ -137,7 +141,7 @@ export default function Sidebar({
         >
           <ImageIcon size={12} />
           Pages
-        </button>
+        </button>}
 
         <button
           id="tab-outline"
@@ -149,7 +153,7 @@ export default function Sidebar({
           }`}
         >
           <Bookmark size={12} />
-          Outline
+          {pdfDoc ? 'Outline' : 'Chapters'}
         </button>
 
         <button
@@ -229,7 +233,7 @@ export default function Sidebar({
                     transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
                     className="w-4 h-4 border-2 border-rapture border-t-transparent rounded-full"
                   />
-                  Scanning PDF text...
+                  Searching document text...
                 </div>
               ) : searchQuery ? (
                 <>
@@ -240,37 +244,32 @@ export default function Sidebar({
                   {searchResults.length > 0 ? (
                     <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
                       {searchResults.map((match, i) => (
-                        <div
+                        <button
+                          type="button"
                           key={`match-${i}`}
-                          onClick={() => onPageClick(match.pageNumber)}
-                          className="p-3 bg-slate-50 hover:bg-rapture-light/30 border border-slate-100 hover:border-rapture/20 rounded-xl transition-all cursor-pointer group"
+                          onClick={event => {
+                            resultFlash.current?.cancel();
+                            resultFlash.current = flashRed(event.currentTarget);
+                            onPageClick(match.pageNumber);
+                          }}
+                          className="block w-full text-left p-3 bg-slate-50 hover:bg-rapture-light/30 border border-slate-100 hover:border-rapture/20 rounded-xl transition-colors cursor-pointer group"
                         >
-                          <div className="flex items-center justify-between mb-1.5">
+                          <span className="flex items-center justify-between mb-1.5">
                             <span className="text-[9px] font-bold font-mono text-rapture uppercase bg-rapture/10 px-1.5 py-0.5 rounded">
-                              Page {match.pageNumber}
+                              {pdfDoc ? 'Page' : 'Chapter'} {match.pageNumber}
                             </span>
                             <span className="text-[9px] text-slate-400 font-mono group-hover:text-rapture transition-colors">
                               Result #{i + 1}
                             </span>
-                          </div>
-                          <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed break-words font-sans">
-                            {/* Simple text highlight inside snippet */}
-                            {(() => {
-                              const queryEscaped = searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                              const regex = new RegExp(`(${queryEscaped})`, 'gi');
-                              const parts = match.snippet.split(regex);
-                              return parts.map((part, index) => 
-                                regex.test(part) ? (
-                                  <mark key={index} className="bg-amber-100 text-amber-950 px-0.5 rounded font-semibold">
-                                    {part}
-                                  </mark>
-                                ) : (
-                                  part
-                                )
-                              );
-                            })()}
-                          </p>
-                        </div>
+                          </span>
+                          <span className="text-xs text-slate-600 line-clamp-2 leading-relaxed break-words font-sans">
+                            {match.snippet.slice(0, match.snippetMatchStart)}
+                            <mark className="bg-amber-100 text-amber-950 px-0.5 rounded font-semibold">
+                              {match.snippet.slice(match.snippetMatchStart, match.snippetMatchEnd)}
+                            </mark>
+                            {match.snippet.slice(match.snippetMatchEnd)}
+                          </span>
+                        </button>
                       ))}
                     </div>
                   ) : (

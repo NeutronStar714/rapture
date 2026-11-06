@@ -2,13 +2,20 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 
 import { createSamplePDF } from './utils/samplePdf';
+import { searchPdfText } from './utils/pdfSearch';
+import { documentKind } from './utils/documentKind';
+import type { EpubBook } from './utils/epub';
+import { EPUB_SETTINGS_KEY, readEpubSettings, type EpubSettings } from './utils/epubSettings';
 import { PDFJS_ASSET_OPTIONS } from './utils/pdfAssets';
 import { toggleFullscreen } from './utils/fullscreen';
 import { LayoutMode, ReadingTheme, OutlineItem, SearchMatch, PageSize, PdfMetadata, RecentPdf, EyelinerNote } from './types';
 import { savePdfToDb, getPdfFromDb, savePdfCacheToDb, getPdfCacheFromDb, deletePdfFromDb } from './utils/db';
 import { tauriSaveNotes, isTauri } from './utils/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { noteCitations } from './utils/noteCitations';
 import { NotePersistence } from './utils/notePersistence';
+import { toggleHighlights, moveHighlight } from './utils/highlights';
+import { readHighlightSelection, highlightRects } from './utils/highlightDom';
 
 // Sub-components
 import Toolbar from './components/Toolbar';
@@ -17,6 +24,8 @@ import NotesSidebar from './components/NotesSidebar';
 import Dropzone from './components/Dropzone';
 import PdfPage from './components/PdfPage';
 import DocInfoModal from './components/DocInfoModal';
+import EpubReader, { type EpubControls } from './components/EpubReader';
+import { epubNoteCitations } from './utils/epubNotes';
 import { Loader2, AlertCircle } from 'lucide-react';
 
 // Set up the local worker for fully offline parsing
@@ -75,16 +84,35 @@ export default function App() {
   const zoomAnchorRef = useRef<{ ratio: number; oldZoom: number; newZoom: number } | null>(null);
   const pendingScrollRestoreRef = useRef<{ scrollTop?: number; scrollLeft?: number; scrollRatio: number; timestamp: number } | null>(null);
   const pdfViewportRef = useRef<HTMLDivElement>(null);
+  const epubControls = useRef<EpubControls>(null);
   const layoutChangePageRef = useRef<number>(1);
   const layoutChangePendingRef = useRef(false);
 
   // Document state
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
+  const [epubBook, setEpubBook] = useState<EpubBook | null>(null);
+  useEffect(() => () => epubBook?.dispose(), [epubBook]);
   const [fileName, setFileName] = useState<string>('');
   const [fileBuffer, setFileBuffer] = useState<ArrayBuffer | null>(null);
   
   // UI preferences
   const [currentPage, setCurrentPage] = useState<number>(1);
+  const [epubChapterPercent, setEpubChapterPercent] = useState(0);
+  const [epubSettings, setEpubSettings] = useState(() => {
+    try { return readEpubSettings(localStorage.getItem(EPUB_SETTINGS_KEY)); }
+    catch { return readEpubSettings(null); }
+  });
+  const epubSettingsRef = useRef(epubSettings);
+  const changeEpubSettings = (next: EpubSettings) => {
+    const cleaned = readEpubSettings(JSON.stringify(next));
+    epubSettingsRef.current = cleaned;
+    setEpubSettings(cleaned);
+    try { localStorage.setItem(EPUB_SETTINGS_KEY, JSON.stringify(cleaned)); } catch { /* Session settings still apply. */ }
+  };
+  const handleEpubPosition = useCallback((chapter: number, percent: number) => {
+    setCurrentPage(chapter);
+    setEpubChapterPercent(percent);
+  }, []);
   const [zoom, setZoom] = useState<number>(1.0);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('single-scroll');
   const [theme, setTheme] = useState<ReadingTheme>('light');
@@ -98,6 +126,7 @@ export default function App() {
 
   // Eyeliner state
   const [eyelinerActive, setEyelinerActive] = useState(false);
+  const [highlighterActive, setHighlighterActive] = useState(false);
   const [eyelinerNotes, renderNotes] = useState<EyelinerNote[]>([]);
   const [noteSaveError, setNoteSaveError] = useState<string | null>(null);
   const [notePersistence] = useState(() => new NotePersistence(saveNotesToFile, localStorage, renderNotes, setNoteSaveError));
@@ -147,6 +176,34 @@ export default function App() {
     ];
   });
 
+  useEffect(() => {
+    // Backfill the library entries that predate EPUB thumbnails, a book at a time.
+    const missingCovers = recentPdfs.filter(entry => (entry.kind === 'epub' || documentKind(entry.name) === 'epub')
+      && !entry.coverUrl && entry.coverText === undefined);
+    if (!missingCovers.length) return;
+    let cancelled = false;
+    void (async () => {
+      const { readEpubCover } = await import('./utils/epub');
+      for (const entry of missingCovers) {
+        if (cancelled) return;
+        try {
+          const data = await getPdfFromDb(entry.name);
+          if (!data || cancelled) continue;
+          const cover = await readEpubCover(data);
+          if (cancelled) return;
+          setRecentPdfs(current => {
+            const index = current.findIndex(item => item.name === entry.name && item.openedAt === entry.openedAt);
+            if (index < 0 || current[index].coverUrl || current[index].coverText !== undefined) return current;
+            const next = current.map((item, i) => i === index ? { ...item, ...cover } : item);
+            try { localStorage.setItem('rapture_recent_pdfs', JSON.stringify(next)); } catch { /* Keep the session thumbnail. */ }
+            return next;
+          });
+        } catch { /* Keep the library usable if an older EPUB cannot supply a cover. */ }
+      }
+    })().catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   // Keep the fullscreen state in sync when it changes outside the toolbar button: Escape or the
   // browser's own controls on the web, and Escape, the green button or the View menu on desktop.
   useEffect(() => {
@@ -181,24 +238,30 @@ export default function App() {
       if (e.key === 'e' && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         setEyelinerActive(prev => !prev);
+        setHighlighterActive(false);
         setMoveNoteId(null);
         setFloatingLinePage(null);
         setFloatingLineY(null);
         return;
       }
 
-      // Ctrl + / Ctrl = — zoom in 10%
-      if ((e.key === '+' || e.key === '=') && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        handleZoomChange(Math.min(3, cur.zoom + 0.1));
-        return;
+      if (e.key === 'Escape') {
+        setHighlighterActive(false);
+        setEyelinerActive(false);
+        setMoveNoteId(null);
+        setFloatingLinePage(null);
+        setFloatingLineY(null);
       }
 
-      // Ctrl - — zoom out 10%
-      if (e.key === '-' && (e.ctrlKey || e.metaKey)) {
+      if ((e.ctrlKey || e.metaKey) && (e.key === '+' || e.key === '=' || e.key === '-')) {
         e.preventDefault();
-        handleZoomChange(Math.max(0.5, cur.zoom - 0.1));
-        return;
+        const decrease = e.key === '-';
+        if (epubControls.current) {
+          const settings = epubSettingsRef.current;
+          changeEpubSettings({ ...settings, size: settings.size + (decrease ? -1 : 1) });
+        } else {
+          handleZoomChange(decrease ? Math.max(0.5, cur.zoom - 0.1) : Math.min(3, cur.zoom + 0.1));
+        }
       }
     };
 
@@ -251,7 +314,9 @@ export default function App() {
       const pdf = await loadingTask.promise;
       
       await notePersistence.activate(name);
+      setMoveNoteId(null);
       setPdfDoc(pdf);
+      setEpubBook(null);
       setFileName(name);
       setFileBuffer(buffer);
       setCurrentPage(1);
@@ -441,59 +506,69 @@ export default function App() {
   useEffect(() => {
     if (!searchQuery.trim()) {
       setSearchResults([]);
+      setIsSearching(false);
       return;
     }
 
     setIsSearching(true);
     const delayDebounce = setTimeout(() => {
-      const matches: SearchMatch[] = [];
-      const queryLower = searchQuery.toLowerCase();
-
-      Object.entries(textByPage).forEach(([pageNumStr, text]) => {
-        const textStr = text as string;
-        const pageNum = parseInt(pageNumStr, 10);
-        const textLower = textStr.toLowerCase();
-
-        let index = textLower.indexOf(queryLower);
-        while (index !== -1) {
-          const start = Math.max(0, index - 40);
-          const end = Math.min(textStr.length, index + queryLower.length + 40);
-          let snippet = textStr.substring(start, end);
-
-          if (start > 0) snippet = '...' + snippet;
-          if (end < textStr.length) snippet = snippet + '...';
-
-          matches.push({
-            pageNumber: pageNum,
-            snippet,
-            index,
-          });
-
-          index = textLower.indexOf(queryLower, index + 1);
-        }
-      });
-
-      setSearchResults(matches);
+      setSearchResults(searchPdfText(textByPage, searchQuery));
       setIsSearching(false);
     }, 250);
 
     return () => clearTimeout(delayDebounce);
   }, [searchQuery, textByPage]);
 
-  // File Selector Callback
-  const handleFileSelect = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      if (reader.result instanceof ArrayBuffer) {
-        try {
-          await savePdfToDb(file.name, reader.result);
-        } catch (dbErr) {
-          console.error('Failed to save PDF to IndexedDB:', dbErr);
-        }
-        loadPdf(reader.result, file.name);
-      }
-    };
-    reader.readAsArrayBuffer(file);
+  const loadEpub = async (buffer: ArrayBuffer, name: string) => {
+    setIsLoading(true);
+    setPdfError(null);
+    let book: EpubBook | undefined;
+    try {
+      const { readEpub } = await import('./utils/epub');
+      book = readEpub(buffer, name);
+      const cover = await book.cover.catch(() => ({ coverText: '' }));
+      await notePersistence.activate(name);
+      setMoveNoteId(null);
+      setPdfDoc(null);
+      setFileBuffer(buffer);
+      setCurrentPage(1);
+      setEpubChapterPercent(0);
+      setSearchQuery('');
+      setSearchResults([]);
+      setPageSizes([]);
+      setMetadata(null);
+      setIsInfoModalOpen(false);
+      pendingScrollRestoreRef.current = null;
+      setOutline(book.chapters.map((chapter, index) => ({ title: chapter.title, pageNumber: index + 1 })));
+      setTextByPage(Object.fromEntries(book.chapters.map((chapter, index) => [index + 1, chapter.text])));
+      setEpubBook(book);
+      setFileName(name);
+      setRecentPdfs(prev => {
+        const next = [{ name, kind: 'epub' as const, subText: book!.title, openedAt: Date.now(), ...cover }, ...prev.filter(entry => entry.name !== name)].slice(0, 12);
+        try { localStorage.setItem('rapture_recent_pdfs', JSON.stringify(next)); } catch { /* Keep this session's recent list. */ }
+        return next;
+      });
+    } catch (error) {
+      book?.dispose();
+      setPdfError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleFileSelect = async (file: File) => {
+    const kind = documentKind(file.name, file.type);
+    if (!kind) { setPdfError('Choose a PDF or EPUB file.'); return; }
+    try {
+      const buffer = await file.arrayBuffer();
+      // Both formats use the existing local document library.
+      try { await savePdfToDb(file.name, buffer); }
+      catch (error) { console.warn('Could not cache document:', error); }
+      if (kind === 'epub') await loadEpub(buffer, file.name);
+      else await loadPdf(buffer, file.name);
+    } catch (error) {
+      setPdfError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   // Sample PDF Loader Callback
@@ -509,8 +584,12 @@ export default function App() {
     } else {
       try {
         const savedBuffer = await getPdfFromDb(pdf.name);
+        const isEpub = pdf.kind === 'epub' || documentKind(pdf.name) === 'epub';
         if (savedBuffer) {
-          loadPdf(savedBuffer, pdf.name);
+          if (isEpub) await loadEpub(savedBuffer, pdf.name);
+          else await loadPdf(savedBuffer, pdf.name);
+        } else if (isEpub) {
+          setPdfError('This EPUB is no longer cached. Open the original file to read it again.');
         } else {
           // If not found in IndexedDB (e.g. initial dummy ones or deleted), load sample bytes with that name
           const sampleBytes = createSamplePDF();
@@ -518,6 +597,7 @@ export default function App() {
         }
       } catch (err) {
         console.error('Failed to load recent PDF from DB:', err);
+        if (pdf.kind === 'epub' || documentKind(pdf.name) === 'epub') { setPdfError('Could not reopen this EPUB from the library.'); return; }
         const sampleBytes = createSamplePDF();
         loadPdf(sampleBytes, pdf.name);
       }
@@ -526,6 +606,10 @@ export default function App() {
 
   // Page selection and scrolling action
   const handlePageChange = useCallback((pageNum: number) => {
+    if (epubBook) {
+      epubControls.current?.jumpToChapter(pageNum);
+      return;
+    }
     if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
     setCurrentPage(pageNum);
 
@@ -535,7 +619,7 @@ export default function App() {
         element.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     }
-  }, [pdfDoc, layoutMode]);
+  }, [epubBook, pdfDoc, layoutMode]);
 
   // Scroll visibility sync callback (updates current page on scroll)
   const handlePageVisible = useCallback((pageNum: number) => {
@@ -767,6 +851,7 @@ export default function App() {
       
       // 3. Clear from localStorage pdf states
       localStorage.removeItem(`rapture_pdf_state_${pdfToDelete.name}`);
+      localStorage.removeItem(`rapture_epub_position_${pdfToDelete.name}`);
       
       // 4. If the deleted PDF is currently opened, close it!
       if (fileName === pdfToDelete.name) {
@@ -808,7 +893,7 @@ export default function App() {
   // Document saving down to user filesystem
   const handleSave = () => {
     if (!fileBuffer) return;
-    const blob = new Blob([fileBuffer], { type: 'application/pdf' });
+    const blob = new Blob([fileBuffer], { type: epubBook ? 'application/epub+zip' : 'application/pdf' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -822,6 +907,8 @@ export default function App() {
     try { await notePersistence.activate(''); }
     catch (error) { setNoteSaveError(String(error)); return; }
     setPdfDoc(null);
+    setEpubBook(null);
+    setPdfError(null);
     setFileName('');
     setFileBuffer(null);
     setCurrentPage(1);
@@ -836,10 +923,61 @@ export default function App() {
   // Eyeliner handlers
   const handleEyelinerToggle = useCallback(() => {
     setEyelinerActive(prev => !prev);
+    setHighlighterActive(false);
     setFloatingLinePage(null);
     setFloatingLineY(null);
     setMoveNoteId(null);
   }, []);
+
+  const handleHighlighterToggle = useCallback(() => {
+    setHighlighterActive(prev => !prev);
+    setEyelinerActive(false);
+    setMoveNoteId(null);
+    setFloatingLinePage(null);
+    setFloatingLineY(null);
+    window.getSelection()?.removeAllRanges();
+  }, []);
+
+  useEffect(() => {
+    if (!highlighterActive || (!pdfDoc && !epubBook)) return;
+    const viewportId = epubBook ? 'epub-view-scroll-container' : 'pdf-view-scroll-container';
+    const layer = epubBook ? '[data-epub-chapter]' : '.rapture-text-layer';
+    let drag: { x: number; y: number } | null = null;
+    const onDown = (event: MouseEvent) => {
+      const target = event.target as Element;
+      if (event.button !== 0 || !target.closest?.('#' + viewportId + ' ' + layer)) return;
+      drag = { x: event.clientX, y: event.clientY };
+      if (!epubBook) window.getSelection()?.removeAllRanges();
+    };
+    const onUp = (event: MouseEvent) => {
+      const origin = drag;
+      drag = null;
+      if (!origin || event.button !== 0 || Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < 3) return;
+      const viewport = document.getElementById(viewportId);
+      const selection = window.getSelection();
+      if (!viewport || !selection) return;
+      const ranges = readHighlightSelection(viewport, selection, !!epubBook);
+      if (!ranges.length) return;
+      setEyelinerNotes(previous => {
+        if (moveNoteId) return moveHighlight(previous, moveNoteId, ranges);
+        let next = previous;
+        for (const range of ranges) next = toggleHighlights(next, range);
+        return next;
+      });
+      setMoveNoteId(null);
+      setNotesSidebarOpen(true);
+      selection.removeAllRanges();
+    };
+    const cancel = () => { drag = null; };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('mouseup', onUp);
+    window.addEventListener('blur', cancel);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('mouseup', onUp);
+      window.removeEventListener('blur', cancel);
+    };
+  }, [highlighterActive, pdfDoc, epubBook, moveNoteId, setEyelinerNotes]);
 
   const handleEyelinerMouseMove = useCallback((e: React.MouseEvent) => {
     if (!eyelinerActive) return;
@@ -876,35 +1014,25 @@ export default function App() {
     setFloatingLineY(null);
   }, []);
 
-  const handleEyelinerClick = useCallback((e: React.MouseEvent) => {
-    if (floatingLinePage === null) return;
-
-    const pageEl = document.getElementById(`pdf-page-container-${floatingLinePage}`);
-    if (!pageEl) return;
-
-    const pageRect = pageEl.getBoundingClientRect();
-    const yInPage = e.clientY - pageRect.top;
-    const yPercent = Math.max(0, Math.min(1, yInPage / pageRect.height));
-
+  const placeEyeliner = useCallback((pageNumber: number, yPercent: number, epubOffset?: number) => {
+    const position = { pageNumber, yPercent, ...(epubOffset === undefined ? {} : { epubOffset }) };
     if (moveNoteId) {
-      // Move existing note
-      setEyelinerNotes(prev =>
-        prev.map(n => (n.id === moveNoteId ? { ...n, pageNumber: floatingLinePage, yPercent } : n)),
-      );
+      setEyelinerNotes(prev => prev.map(note => note.id === moveNoteId ? { ...note, ...position } : note));
       setMoveNoteId(null);
     } else {
-      // Create new note
-      const newNote: EyelinerNote = {
-        id: `eyeliner-${Date.now()}`,
-        pageNumber: floatingLinePage,
-        yPercent,
-        text: '',
-        timestamp: Date.now(),
-      };
-      setEyelinerNotes(prev => [...prev, newNote]);
+      setEyelinerNotes(prev => [...prev, { id: crypto.randomUUID(), ...position, text: '', timestamp: Date.now() }]);
     }
-  }, [floatingLinePage, moveNoteId]);
+    setNotesSidebarOpen(true);
+  }, [moveNoteId, setEyelinerNotes]);
 
+  const handleEyelinerClick = useCallback((e: React.MouseEvent) => {
+    if (!eyelinerActive || floatingLinePage === null) return;
+    const pageEl = document.getElementById('pdf-page-container-' + floatingLinePage);
+    if (!pageEl) return;
+    const pageRect = pageEl.getBoundingClientRect();
+    const yPercent = Math.max(0, Math.min(1, (e.clientY - pageRect.top) / pageRect.height));
+    placeEyeliner(floatingLinePage, yPercent);
+  }, [eyelinerActive, floatingLinePage, placeEyeliner]);
   const handleUpdateEyelinerNoteText = useCallback((id: string, text: string) => {
     setEyelinerNotes(prev => prev.map(n => n.id === id ? { ...n, text } : n));
   }, []);
@@ -915,24 +1043,34 @@ export default function App() {
 
   const handleStartMoveNote = useCallback((id: string) => {
     setMoveNoteId(prev => (prev === id ? null : id));
-    setEyelinerActive(true);
+    const highlight = !!notePersistence.notes.find(n => n.id === id)?.highlight;
+    setEyelinerActive(!highlight);
+    setHighlighterActive(highlight);
     setFloatingLinePage(null);
     setFloatingLineY(null);
-  }, []);
+  }, [notePersistence]);
 
   const handleImportEyelinerNotes = useCallback((importedNotes: EyelinerNote[]) => {
+    setMoveNoteId(null);
     setEyelinerNotes(importedNotes);
   }, []);
 
   const handleScrollToEyelinerLine = useCallback((note: EyelinerNote) => {
+    if (note.epubOffset !== undefined) {
+      epubControls.current?.scrollToNote(note);
+      return;
+    }
     const pageEl = document.getElementById(`pdf-page-container-${note.pageNumber}`);
     const scrollContainer = document.getElementById('pdf-view-scroll-container');
     if (!pageEl || !scrollContainer) return;
 
-    const pageOffsetTop = pageEl.offsetTop;
+    const pageOffsetTop = pageEl.getBoundingClientRect().top - scrollContainer.getBoundingClientRect().top + scrollContainer.scrollTop;
     const pageHeight = pageEl.offsetHeight;
     const containerHeight = scrollContainer.clientHeight;
-    const targetScrollTop = pageOffsetTop + (pageHeight * note.yPercent) - (containerHeight / 2);
+    const layer = pageEl.querySelector<HTMLElement>('.rapture-text-layer');
+    const rect = layer && note.highlight ? highlightRects(layer, note.highlight)[0] : undefined;
+    const targetY = rect ? rect.top - scrollContainer.getBoundingClientRect().top + scrollContainer.scrollTop : pageOffsetTop + pageHeight * note.yPercent;
+    const targetScrollTop = targetY - containerHeight / 2;
 
     scrollContainer.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
   }, []);
@@ -980,6 +1118,8 @@ export default function App() {
     return currentPage % 2 === 0 ? currentPage - 1 : currentPage;
   };
 
+  const hasDocument = !!(pdfDoc || epubBook);
+
   return (
     <div className={`flex flex-col h-screen overflow-hidden font-sans transition-colors duration-300 ${
       theme === 'dark' ? 'theme-dark bg-slate-950 text-slate-300' : 'bg-slate-100 text-slate-800'
@@ -992,11 +1132,14 @@ export default function App() {
         </div>
       )}
       {/* 1. Header & Secondary Toolbar (Merged into Sleek design Component) */}
-      {pdfDoc && (
+      {hasDocument && (
         <Toolbar
           fileName={fileName}
           currentPage={currentPage}
-          totalPages={pdfDoc.numPages}
+          totalPages={pdfDoc?.numPages ?? epubBook?.chapters.length ?? 0}
+          epubChapters={epubBook?.chapters.map(chapter => chapter.title)}
+          epubChapterPercent={epubSettings.showChapterProgress ? epubChapterPercent : undefined}
+          onEpubOptions={epubBook ? () => epubControls.current?.openOptions() : undefined}
           zoom={zoom}
           layoutMode={layoutMode}
           theme={theme}
@@ -1030,7 +1173,7 @@ export default function App() {
       {/* 2. Primary Layout Deck */}
       <div className="flex flex-1 overflow-hidden relative">
         {/* Sidebar panels */}
-        {pdfDoc && sidebarOpen && (
+        {hasDocument && sidebarOpen && (
           <Sidebar
             isOpen={sidebarOpen}
             onClose={() => setSidebarOpen(false)}
@@ -1071,21 +1214,33 @@ export default function App() {
             </div>
           )}
 
-          {!pdfDoc && !isLoading && !pdfError && (
+          {!hasDocument && !isLoading && !pdfError && (
             <Dropzone
               onFileSelect={handleFileSelect}
               onLoadSample={handleLoadSample}
               recentPdfs={recentPdfs}
               onLoadRecent={handleLoadRecent}
               onDeleteRecent={handleDeleteRecent}
+              beforeInstall={notePersistence.flush}
             />
           )}
 
+          {epubBook && !pdfError && (
+            <React.Fragment key={fileName}>
+              <EpubReader
+                book={epubBook} fileName={fileName} theme={theme} onTheme={handleThemeChange}
+                settings={epubSettings} onSettingsChange={changeEpubSettings}
+                notes={eyelinerNotes} eyelinerActive={eyelinerActive} highlighterActive={highlighterActive}
+                onPlaceEyeliner={(chapter, offset, progress) => placeEyeliner(chapter, progress, offset)}
+                onReadingPosition={handleEpubPosition} controlsRef={epubControls}
+              />
+            </React.Fragment>
+          )}
           {/* Active PDF Viewport wrapper */}
           {pdfDoc && !pdfError && (
             <div
               id="pdf-view-scroll-container"
-              className={`flex-1 w-full overflow-auto p-8 select-text flex justify-start items-start relative pdf-theme-${theme}`}
+              className={`flex-1 w-full overflow-auto p-8 select-text flex justify-start items-start relative pdf-theme-${theme} ${highlighterActive ? 'highlighter-active' : ''}`}
               onMouseMove={handleEyelinerMouseMove}
               onClick={handleEyelinerClick}
               onMouseLeave={handleEyelinerLeave}
@@ -1209,17 +1364,24 @@ export default function App() {
         </div>
 
         {/* Right Sidebar / Revision Mode */}
-        {pdfDoc && (notesSidebarOpen || revisionMode) && (
+        {hasDocument && (notesSidebarOpen || revisionMode) && (
           <NotesSidebar
             isOpen={notesSidebarOpen || revisionMode}
             onClose={() => { setNotesSidebarOpen(false); setRevisionMode(false); }}
             fileName={fileName}
             currentPage={currentPage}
+            epub={!!epubBook}
+            findNearest={epubBook ? () => epubControls.current?.locateNearest() : undefined}
+            getCitations={async (notes, limit) => epubBook
+              ? epubNoteCitations(epubBook.chapters, notes, limit)
+              : pdfDoc ? noteCitations(pdfDoc, notes, limit, rotation) : {}}
             eyelinerActive={eyelinerActive}
+            highlighterActive={highlighterActive}
             eyelinerNotes={eyelinerNotes}
             moveNoteId={moveNoteId}
             revisionMode={revisionMode}
             onToggleEyeliner={handleEyelinerToggle}
+            onToggleHighlighter={handleHighlighterToggle}
             onUpdateNoteText={handleUpdateEyelinerNoteText}
             onDeleteNote={handleDeleteEyelinerNote}
             onScrollToLine={handleScrollToEyelinerLine}
@@ -1230,7 +1392,7 @@ export default function App() {
       </div>
 
       {/* 3. Bottom Status Bar (Sleek Footer Height 6) */}
-      {pdfDoc && (
+      {hasDocument && (
         <footer className="h-6 bg-white border-t border-gray-200 flex items-center justify-between px-3 text-[10px] shrink-0 font-sans select-none relative">
           <div className="flex items-center gap-4 text-gray-500 font-medium uppercase tracking-tight">
             <div className="flex items-center gap-1.5">
@@ -1245,7 +1407,7 @@ export default function App() {
             © 2026 NeutronStar714
           </p>
           <div className="flex items-center gap-4 text-gray-500">
-            <span onClick={() => setIsInfoModalOpen(true)} className="hover:text-[#AA262C] cursor-pointer transition-colors font-semibold">User Guide & Document Details</span>
+            {pdfDoc && <span onClick={() => setIsInfoModalOpen(true)} className="hover:text-[#AA262C] cursor-pointer transition-colors font-semibold">User Guide &amp; Document Details</span>}
             <span className="text-gray-900 font-bold hidden sm:inline">1024 x 768 Viewport</span>
           </div>
         </footer>

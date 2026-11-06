@@ -1,5 +1,5 @@
 {
   "name": "Rapture",
-  "description": "Offline PDF reader and note-taking desktop app with portable Eyeliner notes.",
+  "description": "Offline note-taking for PDF and EPUB documents.",
   "requestFramePermissions": []
 }

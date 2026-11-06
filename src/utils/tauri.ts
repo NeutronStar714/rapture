@@ -33,8 +33,9 @@ export async function tauriSaveNotes(
 export async function tauriExportDialog(
   fileName: string,
   notes: EyelinerNote[],
+  markdown?: string,
 ): Promise<string | null | undefined> {
   const inv = getInvoke();
   if (!inv) return undefined; // not in Tauri
-  return inv('export_notes_dialog', { fileName, notes });
+  return markdown === undefined ? inv('export_notes_dialog', { fileName, notes }) : inv('export_markdown_dialog', { fileName, markdown });
 }

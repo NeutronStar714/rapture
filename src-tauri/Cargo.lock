@@ -2335,15 +2335,18 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rapture"
-version = "1.2.0"
+version = "1.6.3"
 dependencies = [
  "log",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-log",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

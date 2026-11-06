@@ -1,7 +1,7 @@
 {
   "name": "rapture",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.6.3",
   "author": "NeutronStar714",
   "type": "module",
   "scripts": {
@@ -21,6 +21,8 @@
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@fontsource/space-grotesk": "^5.3.0",
     "@tauri-apps/api": "^2.11.1",
+    "dompurify": "^3.4.17",
+    "fflate": "^0.8.3",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "pdfjs-dist": "^6.1.200",
@@ -36,5 +38,5 @@
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
   },
-  "description": "Offline PDF reader with portable Eyeliner notes"
+  "description": "Offline note-taking for PDF and EPUB documents"
 }

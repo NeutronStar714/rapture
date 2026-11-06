@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { Loader2, AlertCircle } from 'lucide-react';
 import { PageSize, EyelinerNote } from '../types';
+import { highlightRects } from '../utils/highlightDom';
 
 interface PdfPageProps {
   pdfDoc: pdfjsLib.PDFDocumentProxy;
@@ -32,6 +33,7 @@ export default function PdfPage({
 
   const [renderStatus, setRenderStatus] = useState<'idle' | 'rendering' | 'success' | 'error'>('idle');
   const [isInViewport, setIsInViewport] = useState(false);
+  const [highlights, setHighlights] = useState<{ id: string; left: number; top: number; width: number; height: number }[]>([]);
 
   const activeRenderTask = useRef<any>(null);
 
@@ -103,8 +105,11 @@ export default function PdfPage({
             viewport: vp,
           });
           if (textLayerRef.current) {
-            textLayerRef.current.style.width = '';
-            textLayerRef.current.style.height = '';
+            // PDF.js lays text out in the unrotated page coordinate system.
+            // The root's data-main-rotation transform aligns it with the canvas.
+            const unrotated = vp.clone({ rotation: 0 });
+            textLayerRef.current.style.width = `${unrotated.width}px`;
+            textLayerRef.current.style.height = `${unrotated.height}px`;
           }
           textLayerCancelRef.current = () => tl.cancel();
           await tl.render();
@@ -123,6 +128,16 @@ export default function PdfPage({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pdfDoc, pageNumber, zoom, rotation, isInViewport]);
+
+  useEffect(() => {
+    const layer = textLayerRef.current;
+    if (!layer || renderStatus !== 'success') { setHighlights([]); return; }
+    const bounds = layer.getBoundingClientRect();
+    setHighlights(eyelinerLines.flatMap(note => note.highlight ? highlightRects(layer, note.highlight).map((rect, i) => ({
+      id: `${note.id}-${i}`, left: rect.left - bounds.left, top: rect.top - bounds.top,
+      width: rect.width, height: rect.height,
+    })) : []));
+  }, [eyelinerLines, renderStatus, zoom, rotation]);
 
   const isRotated = rotation % 180 !== 0;
   const cw = (isRotated ? pageSize.height : pageSize.width) * zoom;
@@ -146,8 +161,18 @@ export default function PdfPage({
       {/* PDF.js TextLayer — selectable text with native blue ::selection */}
       <div
         ref={textLayerRef}
+        data-page-number={pageNumber}
         className="rapture-text-layer absolute inset-0 z-10"
       />
+
+      <div className="absolute inset-0 z-20 pointer-events-none" aria-hidden="true" data-highlight-overlay>
+        {highlights.map(rect => (
+          <div key={rect.id} data-highlight-rect className="absolute" style={{
+            left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+            backgroundColor: 'rgba(170, 38, 44, 0.28)',
+          }} />
+        ))}
+      </div>
 
       {/* Loading */}
       {renderStatus !== 'success' && (
@@ -178,7 +203,7 @@ export default function PdfPage({
       </div>
 
       {/* Eyeliner lines */}
-      {eyelinerLines.map((note) => (
+      {eyelinerLines.filter(note => !note.highlight).map((note) => (
         <div
           key={note.id}
           className="absolute left-0 right-0 z-20 pointer-events-none"

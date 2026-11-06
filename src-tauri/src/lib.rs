@@ -1,4 +1,8 @@
 mod atomic_write;
+#[cfg(windows)]
+mod updates;
+#[cfg(windows)]
+mod window_icons;
 use atomic_write::atomic_write;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -146,6 +150,12 @@ fn adopt_legacy_sidecar(notes_dir: &Path, file_name: &str, file_path: &Path) {
 /* ── Notes ── */
 
 #[derive(Serialize, Deserialize, Clone)]
+struct TextHighlight {
+    start: u64,
+    end: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 struct EyelinerNote {
     id: String,
     #[serde(rename = "pageNumber")]
@@ -154,6 +164,10 @@ struct EyelinerNote {
     y_percent: f64,
     text: String,
     timestamp: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    highlight: Option<TextHighlight>,
+    #[serde(default, rename = "epubOffset", skip_serializing_if = "Option::is_none")]
+    epub_offset: Option<u64>,
 }
 
 #[tauri::command]
@@ -235,6 +249,29 @@ async fn export_notes_dialog(
             });
             let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
             atomic_write(&path, json.as_bytes()).map_err(|e| e.to_string())?;
+            Ok(Some(path.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+async fn export_markdown_dialog(
+    app: tauri::AppHandle,
+    file_name: String,
+    markdown: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let default_name = PathBuf::from(sidecar_file_name(&file_name)).with_extension("md");
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog().file()
+        .add_filter("Markdown Notes", &["md"])
+        .set_file_name(default_name.to_string_lossy())
+        .save_file(move |path| { let _ = tx.send(path); });
+    match rx.recv().map_err(|e| e.to_string())? {
+        Some(path) => {
+            let path = PathBuf::from(path.to_string());
+            atomic_write(&path, markdown.as_bytes()).map_err(|e| e.to_string())?;
             Ok(Some(path.to_string_lossy().to_string()))
         }
         None => Ok(None),
@@ -348,6 +385,8 @@ pub fn run() {
 
             // Restore previous window state
             if let Some(win) = app.get_webview_window("main") {
+                #[cfg(windows)]
+                window_icons::install(&win);
                 let handle = app.handle().clone();
                 if let Some(state) = load_window_state(&handle) {
                     let _ = win.set_position(tauri::LogicalPosition::new(state.x, state.y));
@@ -381,7 +420,12 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![save_notes, export_notes_dialog])
+        .invoke_handler(tauri::generate_handler![
+            save_notes, export_notes_dialog, export_markdown_dialog,
+            #[cfg(windows)] updates::check_windows_update,
+            #[cfg(windows)] updates::install_windows_update,
+            #[cfg(windows)] updates::open_rapture_releases,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -390,6 +434,20 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn notes_keep_highlights_when_crossing_the_native_bridge() {
+        let legacy = serde_json::json!({"id":"old", "pageNumber":1, "yPercent":0.2, "text":"old note", "timestamp":1});
+        let note: EyelinerNote = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(note).unwrap(), legacy);
+        let highlighted = serde_json::json!({"id":"new", "pageNumber":2, "yPercent":0.4, "text":"comment", "timestamp":2, "highlight":{"start":4,"end":30}});
+        let note: EyelinerNote = serde_json::from_value(highlighted.clone()).unwrap();
+        assert_eq!(serde_json::to_value(note).unwrap(), highlighted);
+
+        let epub = serde_json::json!({"id":"epub", "pageNumber":2, "yPercent":0.0, "text":"comment", "timestamp":3, "epubOffset":0, "highlight":{"start":0,"end":5}});
+        let note: EyelinerNote = serde_json::from_value(epub.clone()).unwrap();
+        assert_eq!(serde_json::to_value(note).unwrap(), epub);
+    }
 
     #[test]
     fn override_dir_wins_over_platform_dir() {
